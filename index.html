@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>NEXL OS – warehouse robot simulator</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Barlow:wght@400;500&display=swap">
+<style>
+:root{--bg:#eceee9;--ink:#1b2024;--mut:#5d676e;--card:#fff;--line:#cdd3d1;--or:#d9500a;--cy:#0b7f92;--rd:#c4313a;--gn:#23773f;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#14181b;--ink:#e8ebe6;--mut:#9aa5ab;--card:#1c2226;--line:#2e373c;--or:#ff7a2e;--cy:#3cc8dc;--rd:#ff6b73;--gn:#52c97a;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#14181b;--ink:#e8ebe6;--mut:#9aa5ab;--card:#1c2226;--line:#2e373c;--or:#ff7a2e;--cy:#3cc8dc;--rd:#ff6b73;--gn:#52c97a;color-scheme:dark}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:400 15px/1.45 Barlow,system-ui,sans-serif}
+main{max-width:1100px;margin:0 auto;padding:18px 14px 28px}
+h1{font:700 34px/1 "Barlow Condensed",Impact,sans-serif;margin:0 0 4px;letter-spacing:.5px}
+.sub{color:var(--mut);margin:0 0 14px;max-width:62ch}
+.wrap{display:flex;flex-wrap:wrap;gap:14px;align-items:flex-start}
+.floor{flex:1 1 560px;min-width:0}
+canvas{width:100%;height:auto;display:block;border-radius:6px;cursor:crosshair;touch-action:manipulation}
+.bar{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}
+button{font:500 14px Barlow,sans-serif;color:var(--ink);background:var(--card);border:1px solid var(--line);border-radius:6px;padding:9px 13px;cursor:pointer;min-height:40px}
+button:hover{border-color:var(--or)}
+button:focus-visible{outline:2px solid var(--cy);outline-offset:2px}
+button.stop{border-color:var(--rd);color:var(--rd);font-weight:600}
+button.stop.on{background:var(--rd);color:#fff}
+.hint{color:var(--mut);font-size:13px;margin:8px 0 0}
+.side{flex:1 1 280px;min-width:0;display:flex;flex-direction:column;gap:12px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:12px 14px}
+.card h2{font:700 19px "Barlow Condensed",sans-serif;margin:0 0 8px}
+.stats{display:flex;gap:16px;flex-wrap:wrap}
+.stats b{display:block;font:700 28px/1 "Barlow Condensed",sans-serif}
+.stats span{color:var(--mut);font-size:13px}
+.rb{display:flex;justify-content:space-between;padding:5px 0;border-top:1px solid var(--line)}
+.rb:first-of-type{border-top:0}
+.log{max-height:210px;overflow:auto;font-size:13px}
+.log p{margin:0;padding:3px 0;border-top:1px solid var(--line)}
+.t{font-weight:600}
+</style></head>
+<body><main>
+<h1>NEXL OS</h1>
+<p class="sub">Robots plan routes in space and time, so each one knows where the others will be a few seconds from now. Aisles are one-way, like a real fulfilment centre. Tap the floor to place a wall, or change the warehouse size.</p>
+<div class="wrap">
+ <div class="floor">
+  <canvas id="c" aria-label="Warehouse floor simulation"></canvas>
+  <div class="bar">
+   <button id="bT">New task</button>
+   <button id="bA">Auto tasks: on</button>
+   <button id="bR">Add robot</button>
+   <button id="bS">Size: S</button>
+   <button id="bW">Clear walls</button>
+   <button id="bH">Heatmap</button>
+   <button id="bP">Drop person</button>
+   <button id="bE" class="stop">Emergency stop</button>
+  </div>
+  <p class="hint">Faint arrows = one-way lanes. Yellow = robot, red = waiting for others to pass, dashed line = timed route, cone = sensor view, green bar = battery, ⚡ = charging dock, pink dot = person.</p>
+ </div>
+ <div class="side">
+  <div class="card"><div class="stats"><div><b id="sD">0</b><span>delivered</span></div><div><b id="sQ">0</b><span>in queue</span></div><div><b id="sR">0</b><span>robots</span></div><div><b id="sT">–</b><span>avg time (s)</span></div></div></div>
+  <div class="card"><h2>Robots</h2><div id="rl"></div></div>
+  <div class="card"><h2>Live log</h2><div class="log" id="lg"></div></div>
+ </div>
+</div>
+</main>
+<script>
+const cv=document.getElementById('c'),g=cv.getContext('2d'),$=id=>document.getElementById(id);
+const STEP=.28,TAG={Fleet:'var(--or)',Planner:'var(--cy)',Controller:'var(--gn)',Perception:'var(--ink)',Safety:'var(--rd)'};
+let W,H,S,grid,PICK,DROP,HOME,DOCK,robots,tasks,heat,ppl,done,sumT,clock,step,acc,tid,logs=[],sz=0,estop=false,auto=true,showHeat=false;
+
+function log(tag,msg){logs.unshift([tag,msg]);logs=logs.slice(0,40);
+ $('lg').innerHTML=logs.map(([t,m])=>'<p><span class="t" style="color:'+TAG[t]+'">'+t+'</span> '+m+'</p>').join('')}
+
+function build(i){
+ [W,H,S]=[[22,13,30],[32,17,24],[42,21,20]][i];cv.width=W*S;cv.height=H*S;
+ grid=Array.from({length:H},()=>Array(W).fill(0));
+ const n=(W-7)/5;DC.clear();
+ for(let y=0;y<H-1;y++)if(y%4>=2)for(let b=0;b<n;b++)for(let x=4+5*b;x<=7+5*b;x++)grid[y][x]=1;
+ PICK=[];DROP=[];
+ for(let y=0;y<H;y++)if(y%4==1||y==H-1){PICK.push({x:1,y});DROP.push({x:W-2,y})}
+ HOME=[3,7,11].map(y=>({x:2,y})).concat([3,7,11].map(y=>({x:W-3,y})));
+ DOCK=[{x:2,y:2},{x:2,y:11},{x:18,y:2},{x:18,y:11}];
+ robots=[];tasks=[];ppl=[];heat=Array.from({length:H},()=>Array(W).fill(0));
+ done=sumT=clock=step=acc=tid=0;
+ addRobot();addRobot();newTask();log('Controller','NEXL OS started, floor '+W+'x'+H)}
+
+/* one-way lanes: rows y%4==0 east, y%4==1 west; vertical aisles alternate south/north */
+function lane(x,y,dx,dy){
+ const inb=v=>v>=4&&v<=W-5;
+ if(dx)return(inb(x)||inb(x+dx))?dx==(y%4==1?-1:1):true;
+ if(inb(x)&&(x-8)%5==0)return dy==(((x-8)/5)%2==0?1:-1);
+ return true}
+
+const cellAt=(o,t)=>o.plan[Math.min(Math.max(t-o.t0,0),o.plan.length-1)];
+/* priority: heavy load > carrying > going to charge > going to pick up > returning home/idle */
+const prio=r=>r.state=='drop'?(r.mc>1?4:3):r.state=='charge'?2:r.state=='pickup'?1:0;
+const mover=o=>o.state!='idle'&&o.state!='charging';
+function blockedAt(r,x,y,fx,fy,t){
+ for(const o of robots){if(o===r)continue;
+  if(!r.strict&&t>step+1&&mover(o)&&prio(o)<prio(r))continue;const c=cellAt(o,t),p=cellAt(o,t-1);
+  if(c.x==x&&c.y==y)return true;
+  if(p.x==x&&p.y==y&&c.x==fx&&c.y==fy)return true}
+ return false}
+function clearAfter(r,x,y,t){
+ for(const o of robots){if(o===r||(!r.strict&&mover(o)&&prio(o)<prio(r)))continue;for(let k=Math.max(t-o.t0,0);k<o.plan.length;k++)if(o.plan[k].x==x&&o.plan[k].y==y)return false}
+ return true}
+
+/* space-time A*: nodes are (x, y, time); waiting is an action, so robots queue instead of colliding */
+const DIRS=[[1,0],[-1,0],[0,1],[0,-1],[0,0]],DC=new Map();
+/* true shortest distance to the goal that respects one-way lanes; keeps the search small */
+function dmap(goal,relax){
+ const key=goal.x+','+goal.y+','+!!relax;let D=DC.get(key);if(D)return D;
+ D=new Int16Array(W*H).fill(999);D[goal.y*W+goal.x]=0;const q=[goal];
+ for(let i=0;i<q.length;i++){const c=q[i];for(const[dx,dy]of DIRS){const x=c.x-dx,y=c.y-dy;
+  if(x<0||y<0||x>=W||y>=H||grid[y][x]||D[y*W+x]<999)continue;
+  if(!relax&&!lane(x,y,dx,dy))continue;
+  D[y*W+x]=D[c.y*W+c.x]+1;q.push({x,y})}}
+ DC.set(key,D);return D}
+function plan(r,goal,relax){
+ const T0=step,a=r.at,D=dmap(goal,relax),h=(x,y)=>D[y*W+x]*r.mc,B=[],seen=new Set(),h0=h(a.x,a.y);if(h0>=999)return null;
+ const push=(n,f)=>(B[f]=B[f]||[]).push(n);
+ push({x:a.x,y:a.y,t:0,w:0,p:null},h0);
+ let cnt=0;
+ for(let f=h0;f<h0+50&&cnt<7000;f++){const q=B[f];if(!q)continue;
+  while(q.length){
+   const c=q.pop(),k=((c.t*H+c.y)*W+c.x)*3+c.w;if(seen.has(k))continue;seen.add(k);cnt++;
+   if(c.x==goal.x&&c.y==goal.y&&!c.w&&clearAfter(r,c.x,c.y,T0+c.t)){const p=[];for(let z=c;z;z=z.p)p.unshift({x:z.x,y:z.y});return p}
+   for(const[dx,dy]of(c.w?[[0,0]]:DIRS)){
+    const x=c.x+dx,y=c.y+dy,t=c.t+1,mv=dx||dy;
+    if(x<0||y<0||x>=W||y>=H||grid[y][x])continue;
+    if(mv&&!relax&&!lane(c.x,c.y,dx,dy))continue;
+    if(ppl.some(q=>q.x==x&&q.y==y&&Math.abs(q.x-a.x)+Math.abs(q.y-a.y)<=3))continue;
+    if(h(x,y)>=999||blockedAt(r,x,y,c.x,c.y,T0+t))continue;
+    {const nw=mv?r.mc-1:Math.max(0,c.w-1);push({x,y,t,w:nw,p:c},t+h(x,y)+nw)}}}}
+ return null}
+
+function nearestDock(r){let best=DOCK[0],bl=1e9;DOCK.forEach(d=>{const p=plan(r,d);if(p&&p.length<bl){bl=p.length;best=d}});return best}
+function conflicts(a,b){
+ for(let t=step;t<step+80;t++){const ca=cellAt(a,t),cb=cellAt(b,t);
+  if(ca.x==cb.x&&ca.y==cb.y)return true;
+  const pa=cellAt(a,t-1),pb=cellAt(b,t-1);if(pa.x==cb.x&&pa.y==cb.y&&pb.x==ca.x&&pb.y==ca.y)return true}
+ return false}
+/* lower-priority robots whose route clashes with this one give way: they re-plan around it (wait or take a side tile) */
+function yieldOthers(r,d){
+ if(d>3)return;
+ for(const o of robots)if(o!==r&&mover(o)&&prio(o)<prio(r)&&conflicts(r,o)){
+  log('Safety','R'+o.id+' yields to R'+r.id);replan(o,d+1);
+  if(conflicts(r,o)){r.strict=true;replan(r,d+1);r.strict=false;return}}}
+/* watchdog: stuck ~2.5 s away from the goal, so step aside (prefer reversing) */
+function escape(r){
+ const rv=[Math.round(-Math.cos(r.dir)),Math.round(-Math.sin(r.dir))];
+ const c=[[-1,0],[1,0],[0,1],[0,-1]].map(([dx,dy])=>({x:r.at.x+dx,y:r.at.y+dy,dx,dy})).filter(n=>n.x>=0&&n.y>=0&&n.x<W&&n.y<H&&!grid[n.y][n.x]&&!ppl.some(q=>q.x==n.x&&q.y==n.y)&&[1,2,3].every(k=>!blockedAt(r,n.x,n.y,r.at.x,r.at.y,step+k)));
+ c.sort((a,b)=>(b.dx==rv[0]&&b.dy==rv[1])-(a.dx==rv[0]&&a.dy==rv[1]));
+ if(c.length){r.plan=[r.at,c[0],c[0],c[0]];r.t0=step;log('Safety','R'+r.id+' stuck for 2.5 s, escape maneuver: stepping aside');yieldOthers(r,0)}
+ else{log('Safety','R'+r.id+' stuck with no free tile, re-planning');replan(r,0,true)}}
+function replan(r,d=0,rl){
+ const p=rl?plan(r,r.goal,true):(plan(r,r.goal)||plan(r,r.goal,true));
+ if(p){r.plan=p;r.t0=step;yieldOthers(r,d);const w=p.filter((c,k)=>k&&c.x==p[k-1].x&&c.y==p[k-1].y).length;
+  if(w>2)log('Planner','R'+r.id+' timed route: '+(p.length-1)+' steps, '+w+' of them waiting for others to pass')}
+ else{r.plan=[r.at];r.t0=step}}
+
+function addRobot(){
+ if(robots.length>=6)return;const p=HOME[robots.length];
+ robots.push({id:robots.length+1,at:p,pv:p,home:p,plan:[p],t0:step,goal:p,state:'idle',task:null,bat:100,chg:false,ct:0,stk:0,mc:1,dir:0,n:0,blocked:false});
+ log('Fleet','Robot R'+robots.length+' online')}
+
+function newTask(){
+ const a=PICK[Math.random()*PICK.length|0],b=DROP[Math.random()*DROP.length|0],kg=5+(Math.random()*45|0);
+ tasks.push({id:++tid,a,b,r:null,kg,c:clock});log('Fleet','Task #'+tid+' created ('+kg+' kg)')}
+
+function advance(){
+ step++;clock+=STEP;
+ for(let i=ppl.length;i--;)if((ppl[i].ttl-=STEP)<0){ppl.splice(i,1);log('Perception','Person left the aisle')}
+ if(auto&&Math.random()<STEP*.35&&tasks.filter(t=>!t.r).length<3)newTask();
+  const later=[];
+ robots.forEach(r=>{
+  const i=step-r.t0,pr=r.at;r.pv=pr;
+  if(i<r.plan.length){
+   const c=r.plan[i];
+   if((c.x!=pr.x||c.y!=pr.y)&&robots.some(o=>{if(o===r)return false;const q=cellAt(o,step);return q.x==c.x&&q.y==c.y})){later.push(r);r.blocked=true;return}
+   if((c.x!=pr.x||c.y!=pr.y)&&ppl.some(q=>q.x==c.x&&q.y==c.y)){log('Perception','R'+r.id+' sees a person, re-planning');later.push(r);r.blocked=true;return}
+   r.at=c;const mv=c.x!=pr.x||c.y!=pr.y;
+   if(mv){r.dir=Math.atan2(c.y-pr.y,c.x-pr.x);heat[c.y][c.x]++}
+   else if(r.state!='idle')heat[c.y][c.x]+=2;
+   r.blocked=!mv&&r.state!='idle'&&(c.x!=r.goal.x||c.y!=r.goal.y)}})
+ robots.forEach(r=>{
+  if(later.includes(r)){replan(r);return}
+  const pr=r.pv;
+  if(mover(r)&&(r.at.x!=r.goal.x||r.at.y!=r.goal.y)){r.stk=(r.at.x!=pr.x||r.at.y!=pr.y)?0:r.stk+1;if(r.stk>=9){r.stk=0;escape(r)}}else r.stk=0;
+  if(r.state=='idle'){r.blocked=false;return}
+  if(r.state=='charging'){r.blocked=false;r.ct-=STEP;if(r.ct<=0){r.bat=100;r.state='idle';log('Fleet','R'+r.id+' charged to 100%')}return}
+  const end=step-r.t0>=r.plan.length-1;
+  if(end&&r.at.x==r.goal.x&&r.at.y==r.goal.y){
+   if(r.state=='pickup'){r.state='drop';r.goal=r.task.b;r.mc=r.task.kg>25?2:1;replan(r);log('Controller','R'+r.id+' picked up '+r.task.kg+' kg'+(r.mc>1?' (heavy, moves slower)':''))}
+   else if(r.state=='drop'){done++;sumT+=clock-r.task.c;r.n++;tasks.splice(tasks.indexOf(r.task),1);r.task=null;r.mc=1;r.bat=Math.max(0,r.bat-1);
+    if(r.bat<20){r.state='charge';r.goal=nearestDock(r);replan(r);log('Fleet','R'+r.id+' battery '+r.bat+'%, going to charge')}
+    else{r.state='park';r.goal=r.home;replan(r);log('Controller','R'+r.id+' delivered, heading home')}}
+   else if(r.state=='charge'){r.state='charging';r.ct=3;log('Fleet','R'+r.id+' charging at dock')}
+   else r.state='idle'}
+  else if(end&&(step+r.id)%6==0)replan(r)});
+ tasks.filter(t=>!t.r).forEach(t=>{
+  if(tasks.some(o=>o.r&&(o.a===t.a||o.b===t.b)))return;
+  let best=null,bd=1e9;
+  robots.forEach(r=>{if(r.state=='idle'&&r.bat>=20){const d=Math.abs(r.at.x-t.a.x)+Math.abs(r.at.y-t.a.y);if(d<bd){bd=d;best=r}}});
+  if(best){t.r=best;best.task=t;best.state='pickup';best.goal=t.a;best.mc=1;replan(best);log('Fleet','Task #'+t.id+' goes to R'+best.id)}});
+}
+
+function zone(p,c,l){g.fillStyle=c;g.globalAlpha=.22;g.fillRect(p.x*S,p.y*S,S,S);g.globalAlpha=1;
+ g.strokeStyle=c;g.lineWidth=2;g.strokeRect(p.x*S+2,p.y*S+2,S-4,S-4);
+ g.fillStyle=c;g.font='600 '+(S/3|0)+'px Barlow,sans-serif';g.textAlign='center';g.fillText(l,p.x*S+S/2,p.y*S+S/2+3)}
+
+function draw(){
+ const f=estop?0:Math.min(1,acc/STEP);
+ g.fillStyle='#20262b';g.fillRect(0,0,cv.width,cv.height);
+ g.strokeStyle='#2b343a';g.lineWidth=1;
+ for(let i=0;i<=W;i++){g.beginPath();g.moveTo(i*S,0);g.lineTo(i*S,H*S);g.stroke()}
+ for(let j=0;j<=H;j++){g.beginPath();g.moveTo(0,j*S);g.lineTo(W*S,j*S);g.stroke()}
+ g.fillStyle='rgba(255,255,255,.16)';g.font=(S/2|0)+'px Barlow,sans-serif';g.textAlign='center';
+ for(let y=0;y<H;y++)for(let x=4;x<=W-5;x++)if(!grid[y][x]){
+  const v=(x-8)%5==0&&y%4>=2;
+  if(!v&&y%4<2)g.fillText(y%4==1?'‹':'›',x*S+S/2,y*S+S/2+4);
+  else if(v)g.fillText(((x-8)/5)%2==0?'˅':'˄',x*S+S/2,y*S+S/2+4)}
+ PICK.forEach(p=>zone(p,'#3cc8dc','IN'));DROP.forEach(p=>zone(p,'#ff7a2e','OUT'));DOCK.forEach(p=>zone(p,'#52c97a','⚡'));
+ if(showHeat){let m=1;heat.forEach(a=>a.forEach(v=>m=Math.max(m,v)));for(let y=0;y<H;y++)for(let x=0;x<W;x++)if(heat[y][x]>0){g.fillStyle='rgba(255,59,59,'+(.12+.65*heat[y][x]/m)+')';g.fillRect(x*S,y*S,S,S)}}
+ for(let y=0;y<H;y++)for(let x=0;x<W;x++){
+  if(grid[y][x]==1){g.fillStyle='#3a454c';g.fillRect(x*S+1,y*S+1,S-2,S-2);g.fillStyle='#4d5b63';g.fillRect(x*S+5,y*S+5,S-10,S-10)}
+  if(grid[y][x]==2){g.fillStyle='#ff7a2e';g.fillRect(x*S+3,y*S+3,S-6,S-6);g.fillStyle='#20262b';g.fillRect(x*S+S/2-2,y*S+6,4,S-12)}}
+ robots.forEach(r=>{
+  const pl=r.plan.slice(Math.max(0,step-r.t0));if(pl.length<2)return;
+  g.strokeStyle='#3cc8dc';g.lineWidth=2;g.setLineDash([5,4]);g.beginPath();g.moveTo(r.at.x*S+S/2,r.at.y*S+S/2);
+  pl.forEach(p=>g.lineTo(p.x*S+S/2,p.y*S+S/2));g.stroke();g.setLineDash([])});
+ robots.forEach(r=>{
+  const x=(r.pv.x+(r.at.x-r.pv.x)*f)*S,y=(r.pv.y+(r.at.y-r.pv.y)*f)*S;
+  g.fillStyle='rgba(60,200,220,.12)';g.beginPath();g.moveTo(x+S/2,y+S/2);g.arc(x+S/2,y+S/2,3*S,r.dir-Math.PI/2,r.dir+Math.PI/2);g.fill();
+  g.fillStyle=r.blocked?'#e5484d':'#f2b705';g.fillRect(x+4,y+4,S-8,S-8);
+  g.fillStyle='#14181b';g.fillRect(x+4,y+S-7,S-8,5);g.fillStyle=r.bat>50?'#52c97a':r.bat>=20?'#f2b705':'#e5484d';g.fillRect(x+4,y+S-6,(S-8)*r.bat/100,3);
+  if(r.state=='drop'){g.fillStyle='#ff7a2e';g.fillRect(x+S/2-4,y+S/2-4,8,8)}
+  g.fillStyle='#14181b';g.font='700 '+(S/3|0)+'px Barlow,sans-serif';g.textAlign='center';g.fillText('R'+r.id,x+S/2,y+S/2-1)});
+ ppl.forEach(q=>{g.fillStyle='#ff4fa3';g.beginPath();g.arc(q.x*S+S/2,q.y*S+S/2,S*.3,0,7);g.fill()});
+ if(estop){g.fillStyle='rgba(229,72,77,.28)';g.fillRect(0,0,cv.width,cv.height);g.fillStyle='#fff';g.font='700 30px "Barlow Condensed",sans-serif';g.textAlign='center';g.fillText('EMERGENCY STOP',cv.width/2,cv.height/2)}
+}
+
+function panel(){
+ $('sD').textContent=done;$('sQ').textContent=tasks.filter(t=>!t.r).length;$('sR').textContent=robots.length;$('sT').textContent=done?(sumT/done).toFixed(0):'–';
+ const L={idle:'idle',pickup:'going to pick up',drop:'carrying load',park:'returning home',charge:'going to charge',charging:'charging'};
+ $('rl').innerHTML=robots.map(r=>'<div class="rb"><b>R'+r.id+'</b><span>'+(estop?'stopped':r.blocked?'waiting':L[r.state])+' · '+r.bat.toFixed(0)+'% · '+r.n+' done</span></div>').join('')}
+
+cv.addEventListener('click',e=>{
+ const b=cv.getBoundingClientRect(),x=((e.clientX-b.left)/b.width*W)|0,y=((e.clientY-b.top)/b.height*H)|0;
+ if(x<0||y<0||x>=W||y>=H||grid[y][x]==1||[...PICK,...DROP,...HOME,...DOCK].some(p=>p.x==x&&p.y==y))return;
+ if(robots.some(r=>(r.at.x==x&&r.at.y==y)||r.plan.some(p=>p.x==x&&p.y==y)&&r.state!='idle'&&false))return;
+ if(robots.some(r=>r.at.x==x&&r.at.y==y))return;
+ grid[y][x]=grid[y][x]?0:2;DC.clear();
+ robots.forEach(r=>{if(r.state!='idle')replan(r)})});
+
+$('bT').onclick=newTask;
+$('bR').onclick=addRobot;
+$('bS').onclick=e=>{sz=(sz+1)%3;e.target.textContent='Size: '+'SML'[sz];build(sz)};
+$('bA').onclick=e=>{auto=!auto;e.target.textContent='Auto tasks: '+(auto?'on':'off')};
+$('bW').onclick=()=>{for(let y=0;y<H;y++)for(let x=0;x<W;x++)if(grid[y][x]==2)grid[y][x]=0;DC.clear();log('Perception','All walls cleared')};
+$('bH').onclick=e=>{showHeat=!showHeat;e.target.textContent=showHeat?'Heatmap: on':'Heatmap'};
+$('bP').onclick=()=>{for(let i=0;i<80;i++){const x=Math.random()*W|0,y=Math.random()*H|0;if(!grid[y][x]&&!robots.some(r=>r.at.x==x&&r.at.y==y)){ppl.push({x,y,ttl:12});log('Perception','A person walked into the aisle');break}}};
+$('bE').onclick=e=>{estop=!estop;e.target.classList.toggle('on',estop);e.target.textContent=estop?'Release stop':'Emergency stop';log('Safety',estop?'Emergency stop pressed, all robots halted':'Stop released')};
+
+function tick(dt){if(estop)return;acc+=dt;while(acc>=STEP){acc-=STEP;advance()}}
+build(0);
+let last=performance.now();
+(function loop(n){requestAnimationFrame(loop);try{const dt=Math.min(.1,(n-last)/1000);last=n;tick(dt);draw();panel()}catch(err){console.error(err)}})(last);
+</script></body></html>
