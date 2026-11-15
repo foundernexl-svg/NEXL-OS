@@ -7,8 +7,6 @@ The Windows for Warehouse Robots - An operating layer for multi-robot intelligen
 ## What is NEXL-OS?
 NEXL-OS is a self-healing operating system for warehouse robots. Unlike simple grid demos, it solves real-world problems like deadlocks, collisions, and humans walking into aisles.
 
-Built phone-only by a 16-year-old from India.
-
 ## Core Tech Inside (v1.0)
 
 **1. Space-Time A* Routing:**
